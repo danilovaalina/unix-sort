@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 
@@ -24,7 +24,7 @@ func main() {
 	flag.Parse()
 
 	source := "-"
-	var reader io.Reader = os.Stdin
+	var scanner *bufio.Scanner
 	if flag.NArg() > 0 {
 		source = flag.Arg(0)
 		file, err := os.Open(source)
@@ -32,7 +32,9 @@ func main() {
 			log.Fatalf("sort: cannot open '%s': %v\n", source, err)
 		}
 		defer func() { _ = file.Close() }()
-		reader = file
+		scanner = bufio.NewScanner(file)
+	} else {
+		scanner = bufio.NewScanner(os.Stdin)
 	}
 
 	opts := sortutil.SortOptions{
@@ -46,7 +48,7 @@ func main() {
 	}
 
 	if *check {
-		err := sortutil.CheckSorting(reader, source, opts)
+		err := sortutil.CheckSorting(scanner, source, opts)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -54,10 +56,10 @@ func main() {
 	}
 
 	// Попытка in-memory сортировки
-	lines, err := sortutil.ReadLinesWithLimit(reader, sortutil.MaxMemoryBytes)
+	lines, err := sortutil.ReadLinesWithLimit(scanner)
 	if err != nil {
 		if errors.Is(err, sortutil.ErrInputTooLarge) {
-			err = sortutil.ExternalSort(reader, opts, lines)
+			err = sortutil.ExternalSort(scanner, opts, lines)
 			if err != nil {
 				log.Fatal(err)
 			}

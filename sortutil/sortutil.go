@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -40,28 +39,23 @@ type SortOptions struct {
 
 // ReadLinesWithLimit reads lines from r until memory limit is reached.
 // Returns error if input exceeds maxBytes (and at least one line was read).
-func ReadLinesWithLimit(r io.Reader, maxBytes int) ([]string, error) {
-	scanner := bufio.NewScanner(r)
+func ReadLinesWithLimit(s *bufio.Scanner) ([]string, error) {
 	var lines []string
 	totalSize := 0
 
-	for scanner.Scan() {
+	for s.Scan() {
 		line := scanner.Text()
 		// Оценка памяти: длина строки + накладные расходы среза и строки
 		lineSize := len(line) + 16
-		if totalSize+lineSize > maxBytes {
-			if len(lines) == 0 {
-				lines = append(lines, line)
-				totalSize += lineSize
-				continue
-			}
+		if totalSize+lineSize > maxMemoryBytes {
+			lines = append(lines, line)
 			return lines, ErrInputTooLarge
 		}
 		lines = append(lines, line)
 		totalSize += lineSize
 	}
 
-	if err := scanner.Err(); err != nil {
+	if err := s.Err(); err != nil {
 		return nil, err
 	}
 	return lines, nil
@@ -149,13 +143,12 @@ func SortInMemory(lines []string, opts SortOptions) []string {
 	return lines
 }
 
-func CheckSorting(r io.Reader, source string, opts SortOptions) error {
-	scanner := bufio.NewScanner(r)
-	prevLine := scanner.Text()
+func CheckSorting(s *bufio.Scanner, source string, opts SortOptions) error {
+	prevLine := s.Text()
 
 	lineNum := 2
-	for scanner.Scan() {
-		currLine := scanner.Text()
+	for s.Scan() {
+		currLine := s.Text()
 		prev := getKey(prevLine, opts.KeyCol)
 		curr := getKey(currLine, opts.KeyCol)
 		if opts.IgnoreBlanks {

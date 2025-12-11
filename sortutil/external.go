@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"container/heap"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 )
 
-const MaxMemoryBytes = 100 * 1024 * 1024 // 100 MB
+const (
+	maxMemoryBytes = 100 * 1024 * 1024 // 100 MB
+	maxOpenFiles   = 64
+)
 
 type tempFile struct {
 	*os.File
@@ -90,25 +92,19 @@ func (h *mergeHeap) getKey(line string) string {
 }
 
 // ExternalSort performs external merge sort on reader.
-func ExternalSort(reader io.Reader, opts SortOptions, initialLines []string) error {
+func ExternalSort(s *bufio.Scanner, opts SortOptions, initialLines []string) error {
 	var tempFiles []*tempFile
-	defer func() {
-		for _, tf := range tempFiles {
-			tf.File.Close()
-			os.Remove(tf.File.Name())
-		}
-	}()
+	defer cleanup(tempFiles)
 
 	lines := initialLines
 	memoryUsed := estimateMemorySize(lines)
 
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
-		lineSize := len(line) + 32
+	for s.Scan() {
+		line := s.Text()
 
+		lineSize := len(line) + 16
 		// Если превысили лимит в памяти - сортируем и сбрасываем порцию
-		if memoryUsed+lineSize > MaxMemoryBytes && len(lines) > 0 {
+		if memoryUsed+lineSize > maxMemoryBytes && len(lines) > 0 {
 			// Сортируем порцию
 			sortedLines := SortInMemory(lines, opts)
 			// Пишем во временный файл
@@ -125,8 +121,7 @@ func ExternalSort(reader io.Reader, opts SortOptions, initialLines []string) err
 		memoryUsed += lineSize
 	}
 
-	// Проверка ошибки сканера
-	if err := scanner.Err(); err != nil {
+	if err := s.Err(); err != nil {
 		return err
 	}
 
@@ -152,8 +147,77 @@ func ExternalSort(reader io.Reader, opts SortOptions, initialLines []string) err
 		return tf.Scanner.Err()
 	}
 
+	for len(tempFiles) > maxOpenFiles {
+		var nextLevel []*tempFile
+		for i := 0; i < len(tempFiles); i += maxOpenFiles {
+			end := i + maxOpenFiles
+			if end > len(tempFiles) {
+				end = len(tempFiles)
+			}
+			chunk := tempFiles[i:end]
+
+			// Слить chunk в один файл
+			mergedFile, err := mergeChunk(chunk, opts)
+			if err != nil {
+				cleanup(tempFiles)
+				return err
+			}
+			nextLevel = append(nextLevel, mergedFile)
+		}
+		// Закрыть старые файлы
+		cleanup(tempFiles)
+		tempFiles = nextLevel
+	}
+
 	// K-путевое слияние
 	return mergeFiles(tempFiles, opts)
+}
+
+// mergeChunk сливает группу файлов в один временный файл.
+func mergeChunk(files []*tempFile, opts SortOptions) (*tempFile, error) {
+	h := &mergeHeap{opts: opts}
+	heap.Init(h)
+
+	// Загрузить первую строку из каждого файла
+	for i, tf := range files {
+		if tf.Scanner.Scan() {
+			heap.Push(h, mergeItem{
+				line:  tf.Scanner.Text(),
+				file:  tf,
+				index: i,
+			})
+		}
+	}
+
+	// Создать временный файл для результата
+	tmp, err := os.CreateTemp("", "merge-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	defer tmp.Close()
+
+	// Слить в файл
+	for h.Len() > 0 {
+		item := heap.Pop(h).(mergeItem)
+		if _, err = fmt.Fprintln(tmp, item.line); err != nil {
+			return nil, err
+		}
+
+		if item.file.Scanner.Scan() {
+			heap.Push(h, mergeItem{
+				line:  item.file.Scanner.Text(),
+				file:  item.file,
+				index: item.index,
+			})
+		}
+	}
+
+	// Переоткрыть для чтения
+	reopened, err := os.Open(tmp.Name())
+	if err != nil {
+		return nil, err
+	}
+	return &tempFile{File: reopened, Scanner: bufio.NewScanner(reopened)}, nil
 }
 
 // mergeFiles performs k-way merge of sorted temp files.
@@ -256,6 +320,16 @@ func createTempFile(lines []string) (*tempFile, error) {
 		return nil, err
 	}
 	return &tempFile{File: reopened, Scanner: bufio.NewScanner(reopened)}, nil
+}
+
+// cleanup закрывает и удаляет временные файлы.
+func cleanup(files []*tempFile) {
+	for _, tf := range files {
+		if tf != nil && tf.File != nil {
+			tf.File.Close()
+			os.Remove(tf.File.Name())
+		}
+	}
 }
 
 func isUnordered(prev, curr string, opts SortOptions) bool {
